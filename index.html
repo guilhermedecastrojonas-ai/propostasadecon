@@ -227,6 +227,28 @@ details.ign p{margin:6px 0 0}
 .rm-linha:hover{color:var(--danger);background:var(--danger-soft)}
 .rm-linha:focus-visible{outline:2px solid var(--accent)}
 
+/* ---------- cronograma editável ---------- */
+.cr-fase{border:1px solid var(--line);border-radius:var(--r);padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px;background:var(--surface-2)}
+.cr-fase.nova{border-style:dashed}
+.cr-head{display:flex;align-items:baseline;gap:10px;padding-bottom:6px;margin-bottom:2px;border-bottom:1px solid var(--line-strong)}
+.cr-head .n{font-family:var(--ff-d);font-weight:300;font-size:18px;color:var(--accent);line-height:1}
+.cr-head b{font-family:var(--ff-d);font-weight:600;font-size:11px;letter-spacing:.2em;text-transform:uppercase;flex:1;min-width:0;overflow-wrap:anywhere}
+.cr-total{font-size:12.5px;font-weight:700;color:var(--accent);font-variant-numeric:tabular-nums;white-space:nowrap}
+.cr-linha{display:grid;grid-template-columns:minmax(0,1fr) 92px 34px 34px;gap:6px;align-items:center}
+.cr-linha.sub{padding-left:24px;position:relative}
+.cr-linha.sub::before{content:"";position:absolute;left:9px;top:0;bottom:50%;width:9px;border-left:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong)}
+.cr-linha.sub input[type=text]{color:var(--txt-2)}
+.cr-dias{display:flex;align-items:center;border:1px solid var(--line-strong);border-radius:var(--r);background:var(--surface);overflow:hidden;transition:border-color var(--t),box-shadow var(--t)}
+.cr-dias input{border:0;background:transparent;padding:8px 4px 8px 8px;width:100%;min-width:0;text-align:right;font-variant-numeric:tabular-nums;-moz-appearance:textfield;appearance:textfield}
+.cr-dias input::-webkit-inner-spin-button,.cr-dias input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.cr-dias input:focus{outline:none}
+.cr-dias:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.cr-dias span{font-size:12px;color:var(--txt-3);padding-right:8px}
+.cr-vazia{margin:2px 0}
+.cr-geral{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:4px 10px;font-size:13px;color:var(--txt-2)}
+.cr-geral b{color:var(--txt);font-variant-numeric:tabular-nums}
+.cr-geral .dif{color:var(--warn);font-weight:700}
+
 /* ---------- etapas: adicionar / remover ---------- */
 .etapa-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .etapa .rm{all:unset;cursor:pointer;color:var(--txt-3);font-size:12px;font-weight:700;padding:2px 7px;border-radius:4px}
@@ -968,13 +990,13 @@ function renderForm() {
 
     h += sec("05", "Etapas do Projeto", `
       ${campo("f-etapas-intro", "Texto de introdução", p.etapasIntro, { area: true, rows: 2 })}
-      <p class="help" style="margin:0">Atividades que aparecem ao clicar em cada etapa, uma por linha. Nas etapas adicionadas aqui, escreva o prazo como <b>Atividade: 02 dias</b> para ele entrar no cronograma.</p>
+      <p class="help" style="margin:0">Atividades que aparecem ao clicar em cada etapa, uma por linha. Os prazos ficam no <b>Cronograma</b> (seção 07).</p>
       <div class="etapas">${p.etapas.map((e, i) => {
         const manual = p.cronograma[i] && p.cronograma[i].manual;
         return `<div class="etapa${manual ? " nova" : ""}"><div class="etapa-top"><span class="n">${pad(i + 1)}</span>
           <button type="button" class="rm" data-rm="${i}" ${p.etapas.length < 2 ? "disabled title=\"A proposta precisa de ao menos uma etapa\"" : ""} aria-label="Remover a etapa ${i + 1}">Remover</button></div>
         <label class="sr" for="et-t${i}">Título da etapa ${i + 1}</label><input type="text" id="et-t${i}" data-et-t value="${esc(e.titulo)}">
-        <label class="sr" for="et-a${i}">Atividades da etapa ${i + 1}</label><textarea id="et-a${i}" data-et-a rows="4" placeholder="${manual ? "Ex.: Levantamento de dados: 03 dias" : ""}">${esc(manual ? (p.cronograma[i].texto || "") : e.atividades.join("\n"))}</textarea></div>`;
+        <label class="sr" for="et-a${i}">Atividades da etapa ${i + 1}</label><textarea id="et-a${i}" data-et-a rows="4" placeholder="Uma atividade por linha">${esc(e.atividades.join("\n"))}</textarea></div>`;
       }).join("")}<button type="button" class="add-etapa" id="bt-add-etapa">+ Adicionar etapa</button></div>`);
 
     h += sec("06", "Investimento", `<div class="g2">
@@ -987,10 +1009,14 @@ function renderForm() {
         || '<p class="help" style="margin:0">Nenhum botão: a página de Investimento mostra só o valor.</p>'}</div></div>
       <div class="acoes full"><button type="button" class="btn sm" id="bt-add-det" ${p.investimento.detalhes.length >= MAX_DET ? "disabled" : ""}>+ Adicionar botão</button></div></div>`);
 
-    h += sec("07", "Cronograma", `<p class="help" style="margin:0">Lido do escopo. Para mudar, corrija o escopo e envie de novo: os textos que você digitou e as etapas adicionadas aqui são mantidos.</p>
-      <div style="overflow-x:auto"><table class="crono">${p.cronograma.map((c, i) => `<tr class="ph"><td>${pad(i + 1)} · ${esc(c.etapa)}</td><td></td></tr>` +
-        c.atividades.map(x => `<tr><td>${esc(x.nome)}</td><td class="d">${esc(x.duracao)}</td></tr>` +
-          (x.sub || []).map(s => `<tr class="sub"><td>— ${esc(s.nome)}</td><td class="d">${esc(s.duracao)}</td></tr>`).join("")).join("")).join("")}</table></div>`);
+    h += sec("07", "Cronograma", `<p class="help" style="margin:0">Nome e dias de cada atividade. <b>↳</b> cria uma subatividade (linha recuada, como um detalhamento). Enviar o escopo de novo substitui o cronograma das etapas que vieram dele; as etapas criadas aqui continuam.</p>
+      ${p.cronograma.map((c, i) => `<div class="cr-fase${c.manual ? " nova" : ""}" data-cr-fase="${i}">
+        <div class="cr-head"><span class="n">${pad(i + 1)}</span><b data-cr-titulo="${i}">${esc(c.etapa || "Etapa sem título")}</b><span class="cr-total" data-cr-total="${i}"></span></div>
+        ${c.atividades.map((a, j) => linhaCrono(i, j, null, a) + (a.sub || []).map((s, k) => linhaCrono(i, j, k, s)).join("")).join("")
+          || '<p class="help cr-vazia">Sem atividades: a etapa aparece no cronograma só com o título.</p>'}
+        <div><button type="button" class="btn sm" data-cr-add="${i}">+ Atividade</button></div>
+      </div>`).join("")}
+      <div class="cr-geral" id="cr-geral"></div>`);
   }
   f.innerHTML = h;
   ligarForm();
@@ -1028,6 +1054,10 @@ function ligarForm() {
   $("#bt-add-det").onclick = () => adicionarLinha("det");
   $$("[data-rm-ind]").forEach(b => { b.onclick = () => removerLinha("ind", +b.dataset.rmInd); });
   $$("[data-rm-det]").forEach(b => { b.onclick = () => removerLinha("det", +b.dataset.rmDet); });
+  $$("[data-cr-add]").forEach(b => { b.onclick = () => adicionarAtividade(+b.dataset.crAdd); });
+  $$("[data-cr-addsub]").forEach(b => { b.onclick = () => { const [i, j] = b.dataset.crAddsub.split(".").map(Number); adicionarAtividade(i, j); }; });
+  $$("[data-cr-rm]").forEach(b => { b.onclick = () => { const [i, j, k] = b.dataset.crRm.split(".").map(Number); removerAtividade(i, j, isNaN(k) ? null : k); }; });
+  atualizarCrono();
 
   ["f-saudacao", "f-carta"].forEach(id => {
     const el = $("#" + id);
@@ -1039,7 +1069,7 @@ function ligarForm() {
   }));
   $("#form").oninput = e => {
     if (e.target.id === "tx-escopo") return;
-    coletar(); marcarSujo(); atualizarPrevia();
+    coletar(); marcarSujo(); atualizarPrevia(); atualizarCrono();
     if (e.target.classList.contains("err") && e.target.value.trim()) e.target.classList.remove("err");
     if (e.target.id === "f-cliente") { const c = $(".crumb"); if (c && c.firstChild) c.firstChild.textContent = e.target.value || "Nova proposta"; }
   };
@@ -1072,14 +1102,20 @@ function coletar() {
   p.etapasIntro = $("#f-etapas-intro").value.trim();
   const et = $$("[data-et-t]"), ea = $$("[data-et-a]");
   p.etapas = et.map((t, i) => {
-    const titulo = t.value.trim(), c = p.cronograma[i];
-    if (c) c.etapa = titulo;
-    if (c && c.manual) {   // etapa criada no painel: as linhas também formam o cronograma
-      c.texto = ea[i].value;
-      c.atividades = lerAtividadesManuais(ea[i].value);
-      return { titulo, atividades: c.atividades.map(x => x.nome) };
-    }
+    const titulo = t.value.trim();
+    if (p.cronograma[i]) { p.cronograma[i].etapa = titulo; delete p.cronograma[i].texto; }   // "texto": formato antigo
     return { titulo, atividades: linhas(ea[i].value) };
+  });
+  // cronograma: linhas na ordem da tela; subatividade pertence à atividade acima dela
+  p.cronograma.forEach((c, i) => {
+    const linhasCr = $$(`[data-cr-f="${i}"]`);
+    if (!linhasCr.length && !$(`[data-cr-fase="${i}"]`)) return;   // seção ainda não desenhada
+    c.atividades = [];
+    linhasCr.forEach(l => {
+      const item = { nome: $("[data-cr-nome]", l).value.trim(), duracao: diasParaTexto($("[data-cr-dias]", l).value) };
+      if (l.dataset.crNivel === "sub") { const pai = c.atividades[c.atividades.length - 1]; if (pai) pai.sub.push(item); }
+      else c.atividades.push(Object.assign(item, { sub: [] }));
+    });
   });
   p.investimento.valor = $("#f-valor").value.trim().replace(/^R\$\s*/i, "");
   const dr = $$("[data-det-r]"), dv = $$("[data-det-v]");
@@ -1087,13 +1123,6 @@ function coletar() {
 }
 
 /* ---------------- etapas: adicionar / remover ---------------- */
-/** "Levantamento: 03 dias" → { nome, duracao: "03 Dias" }; sem prazo → duração vazia. */
-function lerAtividadesManuais(txt) {
-  return linhas(txt).map(l => {
-    const m = l.match(/^(.*?)\s*:\s*(\d{1,3})\s*dias?\.?$/i);
-    return m && m[1].trim() ? { nome: m[1].trim(), duracao: formatarDias(+m[2]) } : { nome: l, duracao: "" };
-  });
-}
 /** Mantém a introdução automática ("estruturado em N etapas") enquanto o consultor não a editar. */
 function mudarEtapas(mudanca) {
   coletar();
@@ -1106,7 +1135,7 @@ function adicionarEtapa() {
   mudarEtapas(p => {
     while (p.cronograma.length < p.etapas.length) p.cronograma.push({ etapa: p.etapas[p.cronograma.length].titulo, atividades: [] });
     p.etapas.push({ titulo: "Nova etapa", atividades: [] });
-    p.cronograma.push({ etapa: "Nova etapa", atividades: [], manual: true, texto: "" });
+    p.cronograma.push({ etapa: "Nova etapa", atividades: [], manual: true });   // manual: criada no painel, sobrevive a um novo escopo
   });
   const t = $$("[data-et-t]").pop();
   if (t) { t.scrollIntoView({ behavior: "smooth", block: "center" }); t.focus(); t.select(); }
@@ -1143,6 +1172,66 @@ function removerLinha(tipo, i) {
   toast(L.nome + (oQue ? ' "' + oQue + '"' : "") + " removido.", false, {
     rotulo: "Desfazer",
     fn: () => atual === alvo && tela === "editor" && mudarLinhas(p => L.lista(p).splice(i, 0, removida))
+  });
+}
+
+/* ---------------- cronograma editável ---------------- */
+/** "04 Dias" → 4; sem número → "". */
+const diasDoTexto = t => { const m = String(t || "").match(/\d+/); return m ? +m[0] : ""; };
+/** 4 → "04 Dias" (formato da proposta); vazio → "". */
+const diasParaTexto = v => { const n = parseInt(v, 10); return isFinite(n) && n >= 0 ? formatarDias(n) : ""; };
+
+/** Uma linha do cronograma: atividade (k = null) ou subatividade k da atividade j. */
+function linhaCrono(i, j, k, x) {
+  const sub = k != null, id = "cr-" + i + "-" + j + (sub ? "-" + k : ""), ref = i + "." + j + (sub ? "." + k : "");
+  const nome = x.nome || (sub ? "subatividade" : "atividade");
+  return `<div class="cr-linha${sub ? " sub" : ""}" data-cr-f="${i}" data-cr-nivel="${sub ? "sub" : "ativ"}">
+    <label class="sr" for="${id}-n">${sub ? "Subatividade" : "Atividade"}</label><input type="text" id="${id}-n" data-cr-nome value="${esc(x.nome)}" placeholder="${sub ? "Subatividade" : "Atividade"}">
+    <label class="sr" for="${id}-d">Dias de ${esc(nome)}</label><div class="cr-dias"><input type="number" id="${id}-d" data-cr-dias min="0" max="999" step="1" inputmode="numeric" value="${diasDoTexto(x.duracao)}" placeholder="—"><span>dias</span></div>
+    ${sub ? "<span></span>" : `<button type="button" class="rm-linha" data-cr-addsub="${ref}" title="Adicionar subatividade" aria-label="Adicionar subatividade em ${esc(nome)}">↳</button>`}
+    <button type="button" class="rm-linha" data-cr-rm="${ref}" title="Remover" aria-label="Remover ${esc(nome)}">×</button></div>`;
+}
+
+/** Totais por etapa (soma das atividades; subatividades são detalhamento) e total geral. */
+function atualizarCrono() {
+  const p = atual?.dados;
+  if (!p || !$("#cr-geral")) return;
+  let geral = 0;
+  p.cronograma.forEach((c, i) => {
+    const soma = c.atividades.reduce((t, a) => t + (diasDoTexto(a.duracao) || 0), 0);
+    geral += soma;
+    const tot = $(`[data-cr-total="${i}"]`); if (tot) tot.textContent = soma === 1 ? "1 dia" : soma + " dias";
+    const tit = $(`[data-cr-titulo="${i}"]`); if (tit) tit.textContent = c.etapa || "Etapa sem título";
+  });
+  const dur = p.investimento.detalhes.find(d => d.rotulo === cfg.rotulos.duracao || d.rotulo === ROTULOS_PADRAO.duracao);
+  const informada = dur ? diasDoTexto(dur.valor) : "";
+  $("#cr-geral").innerHTML = `Total do cronograma: <b>${geral} dia${geral === 1 ? "" : "s"}</b>` +
+    (informada !== "" && informada !== geral ? ` <span class="dif">· o botão "${esc(dur.rotulo)}" diz ${informada} dias</span>` : "");
+}
+
+function adicionarAtividade(i, j) {   // j definido → subatividade da atividade j
+  mudarLinhas(p => {
+    const c = p.cronograma[i];
+    if (j == null) c.atividades.push({ nome: "", duracao: "", sub: [] });
+    else (c.atividades[j].sub = c.atividades[j].sub || []).push({ nome: "", duracao: "" });
+  });
+  const alvo = j == null ? $$(`[data-cr-f="${i}"][data-cr-nivel="ativ"] [data-cr-nome]`).pop() : $(`#cr-${i}-${j}-${atual.dados.cronograma[i].atividades[j].sub.length - 1}-n`);
+  if (alvo) { alvo.scrollIntoView({ behavior: "smooth", block: "center" }); alvo.focus(); }
+}
+function removerAtividade(i, j, k) {
+  const alvo = atual;
+  let removida, lista;
+  mudarLinhas(p => {
+    lista = k == null ? p.cronograma[i].atividades : p.cronograma[i].atividades[j].sub;
+    removida = lista.splice(k == null ? j : k, 1)[0];
+  });
+  const oQue = removida && removida.nome;
+  toast((k == null ? "Atividade" : "Subatividade") + (oQue ? ' "' + oQue + '"' : "") + " removida.", false, {
+    rotulo: "Desfazer",
+    fn: () => atual === alvo && tela === "editor" && mudarLinhas(p => {
+      const l = k == null ? p.cronograma[i].atividades : p.cronograma[i].atividades[j].sub;
+      l.splice(k == null ? j : k, 0, removida);
+    })
   });
 }
 
@@ -1240,6 +1329,10 @@ function paraProposta(d) {
   const c = clone(d);
   c.indicadores = (c.indicadores || []).filter(x => x.valor).slice(0, MAX_IND);
   c.investimento.detalhes = (c.investimento.detalhes || []).filter(x => x.rotulo && x.valor).slice(0, MAX_DET);
+  // cronograma: atividades sem nome ficam só no formulário
+  c.cronograma = (c.cronograma || []).map(f => Object.assign({}, f, {
+    atividades: (f.atividades || []).filter(a => a.nome).map(a => Object.assign({}, a, { sub: (a.sub || []).filter(s => s.nome) }))
+  }));
   return c;
 }
 async function montarHTML(dados, extraHead = "", extraBody = "") {
