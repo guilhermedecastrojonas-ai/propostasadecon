@@ -990,7 +990,7 @@ function renderForm() {
 
     h += sec("05", "Etapas do Projeto", `
       ${campo("f-etapas-intro", "Texto de introdução", p.etapasIntro, { area: true, rows: 2 })}
-      <p class="help" style="margin:0">Atividades que aparecem ao clicar em cada etapa, uma por linha. Os prazos ficam no <b>Cronograma</b> (seção 07).</p>
+      <p class="help" style="margin:0">Atividades que aparecem ao clicar em cada etapa, uma por linha. Os prazos ficam no <b>Cronograma</b> (seção 06).</p>
       <div class="etapas">${p.etapas.map((e, i) => {
         const manual = p.cronograma[i] && p.cronograma[i].manual;
         return `<div class="etapa${manual ? " nova" : ""}"><div class="etapa-top"><span class="n">${pad(i + 1)}</span>
@@ -999,7 +999,16 @@ function renderForm() {
         <label class="sr" for="et-a${i}">Atividades da etapa ${i + 1}</label><textarea id="et-a${i}" data-et-a rows="4" placeholder="Uma atividade por linha">${esc(e.atividades.join("\n"))}</textarea></div>`;
       }).join("")}<button type="button" class="add-etapa" id="bt-add-etapa">+ Adicionar etapa</button></div>`);
 
-    h += sec("06", "Investimento", `<div class="g2">
+    h += sec("06", "Cronograma", `<p class="help" style="margin:0">Nome e dias de cada atividade. <b>↳</b> cria uma subatividade (linha recuada, como um detalhamento). Enviar o escopo de novo substitui o cronograma das etapas que vieram dele; as etapas criadas aqui continuam.</p>
+      ${p.cronograma.map((c, i) => `<div class="cr-fase${c.manual ? " nova" : ""}" data-cr-fase="${i}">
+        <div class="cr-head"><span class="n">${pad(i + 1)}</span><b data-cr-titulo="${i}">${esc(c.etapa || "Etapa sem título")}</b><span class="cr-total" data-cr-total="${i}"></span></div>
+        ${c.atividades.map((a, j) => linhaCrono(i, j, null, a) + (a.sub || []).map((s, k) => linhaCrono(i, j, k, s)).join("")).join("")
+          || '<p class="help cr-vazia">Sem atividades: a etapa aparece no cronograma só com o título.</p>'}
+        <div><button type="button" class="btn sm" data-cr-add="${i}">+ Atividade</button></div>
+      </div>`).join("")}
+      <div class="cr-geral" id="cr-geral"></div>`);
+
+    h += sec("07", "Investimento", `<div class="g2">
       <div class="field"><label for="f-valor">Valor <span class="req">*</span></label><div class="money"><span>R$</span><input type="text" id="f-valor" value="${esc(p.investimento.valor)}" placeholder="23.500,00" inputmode="decimal"></div></div>
       <div></div>
       <div class="field full"><label>Botões <span class="help">· rótulo e informação revelada ao clicar · até ${MAX_DET}</span></label><div class="stack">${p.investimento.detalhes.map((d, i) =>
@@ -1008,15 +1017,6 @@ function renderForm() {
           <button type="button" class="rm-linha" data-rm-det="${i}" aria-label="Remover o botão ${i + 1}" title="Remover">×</button></div>`).join("")
         || '<p class="help" style="margin:0">Nenhum botão: a página de Investimento mostra só o valor.</p>'}</div></div>
       <div class="acoes full"><button type="button" class="btn sm" id="bt-add-det" ${p.investimento.detalhes.length >= MAX_DET ? "disabled" : ""}>+ Adicionar botão</button></div></div>`);
-
-    h += sec("07", "Cronograma", `<p class="help" style="margin:0">Nome e dias de cada atividade. <b>↳</b> cria uma subatividade (linha recuada, como um detalhamento). Enviar o escopo de novo substitui o cronograma das etapas que vieram dele; as etapas criadas aqui continuam.</p>
-      ${p.cronograma.map((c, i) => `<div class="cr-fase${c.manual ? " nova" : ""}" data-cr-fase="${i}">
-        <div class="cr-head"><span class="n">${pad(i + 1)}</span><b data-cr-titulo="${i}">${esc(c.etapa || "Etapa sem título")}</b><span class="cr-total" data-cr-total="${i}"></span></div>
-        ${c.atividades.map((a, j) => linhaCrono(i, j, null, a) + (a.sub || []).map((s, k) => linhaCrono(i, j, k, s)).join("")).join("")
-          || '<p class="help cr-vazia">Sem atividades: a etapa aparece no cronograma só com o título.</p>'}
-        <div><button type="button" class="btn sm" data-cr-add="${i}">+ Atividade</button></div>
-      </div>`).join("")}
-      <div class="cr-geral" id="cr-geral"></div>`);
   }
   f.innerHTML = h;
   ligarForm();
