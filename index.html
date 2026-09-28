@@ -104,7 +104,7 @@ main{min-width:0;display:flex;flex-direction:column;overflow:hidden}
 .field>label{font-size:12.5px;font-weight:700;color:var(--txt-2)}
 .field .req{color:var(--danger)}
 .help{font-size:12px;color:var(--txt-3);font-weight:400}
-input[type=text],input[type=search],select,textarea{width:100%;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r);padding:8px 10px;transition:border-color var(--t),box-shadow var(--t)}
+input[type=text],input[type=search],input[type=password],select,textarea{width:100%;background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--r);padding:8px 10px;transition:border-color var(--t),box-shadow var(--t)}
 textarea{resize:vertical;min-height:70px;line-height:1.55}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
 .err{border-color:var(--danger)!important;box-shadow:0 0 0 3px var(--danger-soft)!important}
@@ -344,7 +344,7 @@ code,.guia pre{font-family:ui-monospace,Consolas,'Courier New',monospace;font-si
           <p>Geradas a partir do escopo de cada projeto, após a Reunião de Apresentação de Proposta.</p>
         </div>
       </div>
-      <div class="note info">O histórico fica salvo <b>neste navegador, neste computador</b>. Em <b>Configurações › Backup do histórico</b> você exporta uma cópia ou leva as propostas para outro computador.</div><div id="sem-db" hidden></div>
+      <div class="note info">O histórico fica salvo <b>neste navegador, neste computador</b>, protegido pela sua senha. Em <b>Configurações › Backup do histórico</b> você exporta uma cópia ou leva as propostas para outro computador.</div><div id="sem-db" hidden></div>
       <div class="kpis" id="kpis"></div>
       <div class="filters">
         <label class="sr" for="f-busca">Buscar</label>
@@ -394,47 +394,90 @@ code,.guia pre{font-family:ui-monospace,Consolas,'Courier New',monospace;font-si
 <script>
 /* ============================================================
    VERSÃO INDEPENDENTE — substitui os recursos da plataforma:
-   · histórico e configurações → localStorage deste navegador
-   · downloads                 → download comum do navegador
-   · modelo                    → embutido neste arquivo
-   (exportar/importar o histórico fica no código principal, em Configurações)
+   · acesso      → login e senha deste navegador (tela de entrada)
+   · histórico   → cofre criptografado no localStorage (AES-GCM 256,
+                   chave derivada da senha com PBKDF2-SHA256)
+   · downloads   → download comum do navegador
+   · modelo      → embutido neste arquivo
+   A senha nunca é guardada: só abre o cofre. Sem ela não há como ler os
+   dados; a única recuperação é um backup exportado em Configurações.
    ============================================================ */
 (function () {
-  var CHAVES = { propostas: "adecon.propostas.v1", config: "adecon.config.v1" };
-  var CHAVE_EXEMPLO = "adecon.propostas.exemplo";
-  var ouvintes = [];   // só a coleção "propostas" é observada pela página
+  var ACESSOS = "adecon.acessos.v1";              // { contas: { login: { nome, sal, iter, criadoEm } } }
+  var COFRE = "adecon.cofre.v1.";                 // + login → { iv, dados } (texto cifrado)
+  var SESSAO = "adecon.sessao.v1";                // sessionStorage: chave da aba aberta
+  var ANTIGAS = { propostas: "adecon.propostas.v1", config: "adecon.config.v1" };   // versões sem senha
+  var ITERACOES = 310000, INATIVIDADE_MS = 30 * 60 * 1000, TENTATIVAS = 5, ESPERA_S = 30;
 
-  function chave(colecao) { return CHAVES[colecao] || ("adecon." + colecao + ".v1"); }
-  function ler(colecao) {
-    try { return JSON.parse(localStorage.getItem(chave(colecao)) || "{}"); } catch (e) { return {}; }
+  var enc = new TextEncoder(), dec = new TextDecoder();
+  var b64 = function (buf) { var s = "", a = new Uint8Array(buf); for (var i = 0; i < a.length; i++) s += String.fromCharCode(a[i]); return btoa(s); };
+  var deB64 = function (t) { var s = atob(t), a = new Uint8Array(s.length); for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i); return a; };
+  var normal = function (l) { return String(l || "").trim().toLowerCase(); };
+  function lerJSON(armazem, chave, padrao) { try { var v = armazem.getItem(chave); return v ? JSON.parse(v) : padrao; } catch (e) { return padrao; } }
+  function lerAcessos() { var a = lerJSON(localStorage, ACESSOS, null); return a && a.contas ? a : { contas: {} }; }
+
+  /* ---------------- criptografia ---------------- */
+  async function derivar(senha, sal, iter) {
+    var base = await crypto.subtle.importKey("raw", enc.encode(senha), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey({ name: "PBKDF2", salt: sal, iterations: iter, hash: "SHA-256" },
+      base, { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
   }
-  function gravar(colecao, obj) {
-    try { localStorage.setItem(chave(colecao), JSON.stringify(obj)); }
+  async function cifrar(chave, obj) {
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    var ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, chave, enc.encode(JSON.stringify(obj)));
+    return { iv: b64(iv), dados: b64(ct) };
+  }
+  async function decifrar(chave, pacote) {   // senha errada ou dado adulterado → rejeita
+    var pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: deB64(pacote.iv) }, chave, deB64(pacote.dados));
+    return JSON.parse(dec.decode(pt));
+  }
+
+  /* ---------------- cofre aberto (só em memória) ---------------- */
+  var sessao = null;            // { login, nome, chave }
+  var estado = { propostas: {}, config: {} };
+  var ouvintes = [];
+  var liberar, liberado = new Promise(function (ok) { liberar = ok; });
+
+  async function persistir() {
+    var pacote = await cifrar(sessao.chave, estado);
+    try { localStorage.setItem(COFRE + sessao.login, JSON.stringify(pacote)); }
     catch (e) { var err = new Error("o armazenamento do navegador está cheio"); err.code = "quota_exceeded"; throw err; }
   }
   function emitir() {
-    var o = ler("propostas");
+    var o = estado.propostas;
     var docs = Object.keys(o).map(function (id) { return { id: id, exists: true, data: function () { return o[id]; } }; })
       .sort(function (a, b) { return String(b.data().atualizadoEm || "").localeCompare(String(a.data().atualizadoEm || "")); });
     ouvintes.forEach(function (f) { f({ docs: docs, size: docs.length, empty: !docs.length }); });
   }
-  // outra aba deste navegador alterou o histórico
-  addEventListener("storage", function (e) { if (e.key === CHAVES.propostas) emitir(); });
+  // outra aba deste navegador, no mesmo acesso, salvou algo
+  addEventListener("storage", async function (e) {
+    if (!sessao || e.key !== COFRE + sessao.login || !e.newValue) return;
+    try { estado = await decifrar(sessao.chave, JSON.parse(e.newValue)); emitir(); } catch (err) {}
+  });
 
+  /* ---------------- db e downloads (mesma interface da plataforma) ---------------- */
   function ref(colecao, id) {
     function mudou() { if (colecao === "propostas") setTimeout(emitir, 0); }
+    function tabela() { return estado[colecao] || (estado[colecao] = {}); }
     return {
       id: id,
-      get: async function () { var o = ler(colecao), d = o[id]; return { id: id, exists: !!d, data: function () { return d; } }; },
-      set: async function (d) { var o = ler(colecao); o[id] = JSON.parse(JSON.stringify(d)); gravar(colecao, o); mudou(); },
-      update: async function (d) { var o = ler(colecao); if (!o[id]) { var e = new Error("documento não encontrado"); e.code = "invalid_argument"; throw e; } Object.assign(o[id], d); gravar(colecao, o); mudou(); },
-      delete: async function () { var o = ler(colecao); delete o[id]; gravar(colecao, o); mudou(); }
+      get: async function () { var d = tabela()[id]; return { id: id, exists: !!d, data: function () { return d; } }; },
+      set: async function (d) { tabela()[id] = JSON.parse(JSON.stringify(d)); await persistir(); mudou(); },
+      update: async function (d) {
+        var t = tabela();
+        if (!t[id]) { var e = new Error("documento não encontrado"); e.code = "invalid_argument"; throw e; }
+        Object.assign(t[id], d); await persistir(); mudou();
+      },
+      delete: async function () { delete tabela()[id]; await persistir(); mudou(); }
     };
   }
   function colecao(nome) {
     var c = {
       orderBy: function () { return c; },
-      onSnapshot: function (f) { if (nome === "propostas") { ouvintes.push(f); setTimeout(emitir, 0); } return function () { ouvintes = ouvintes.filter(function (x) { return x !== f; }); }; },
+      onSnapshot: function (f) {
+        if (nome === "propostas") { ouvintes.push(f); setTimeout(emitir, 0); }
+        return function () { ouvintes = ouvintes.filter(function (x) { return x !== f; }); };
+      },
       doc: function (id) { return ref(nome, id || ("p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7))); }
     };
     return c;
@@ -443,7 +486,6 @@ code,.guia pre{font-family:ui-monospace,Consolas,'Courier New',monospace;font-si
     collection: function (nome) { return colecao(nome); },
     doc: function (p) { var s = p.split("/"); return ref(s[0], s[1]); }
   };
-
   var downloads = {
     save: async function (o) {
       var data = o.data;
@@ -455,26 +497,279 @@ code,.guia pre{font-family:ui-monospace,Consolas,'Courier New',monospace;font-si
       return { status: "saved" };
     }
   };
+  // o painel só recebe o histórico depois do login
+  window.claude = { use: function (nome) { return liberado.then(function () { return { db: db, downloads: downloads }[nome] || null; }); } };
 
-  window.claude = { use: function (nome) { return Promise.resolve({ db: db, downloads: downloads }[nome] || null); } };
-
-  // proposta de exemplo, incluída só na primeira abertura (a versão pública não traz exemplo)
-  try {
-    var ex = document.getElementById("exemplo-gelaboca");
-    if (ex && !localStorage.getItem(CHAVE_EXEMPLO)) {
-      var o = ler("propostas");
-      if (!o["exemplo-gelaboca"]) { var d = JSON.parse(ex.textContent); d.criadoEm = d.atualizadoEm = new Date().toISOString(); o["exemplo-gelaboca"] = d; gravar("propostas", o); }
-      localStorage.setItem(CHAVE_EXEMPLO, "1");
-    }
-  } catch (e) {}
-
-  // modelo embutido (base64 → texto UTF-8)
+  /* ---------------- modelo embutido (base64 → texto UTF-8) ---------------- */
   window.__modeloLocal = function () {
-    var b = atob(document.getElementById("modelo-proposta").textContent.trim());
-    var bytes = new Uint8Array(b.length);
-    for (var i = 0; i < b.length; i++) bytes[i] = b.charCodeAt(i);
-    return new TextDecoder("utf-8").decode(bytes);
+    return dec.decode(deB64(document.getElementById("modelo-proposta").textContent.trim()));
   };
+
+  /* ---------------- abrir, criar e trocar senha ---------------- */
+  async function abrir(login, nome, chave, dados) {
+    sessao = { login: login, nome: nome, chave: chave };
+    estado = { propostas: dados.propostas || {}, config: dados.config || {} };
+    try { sessionStorage.setItem(SESSAO, JSON.stringify({ login: login, chave: b64(await crypto.subtle.exportKey("raw", chave)) })); } catch (e) {}
+    document.getElementById("acesso").remove();
+    document.documentElement.classList.remove("travado");
+    montarUsuario();
+    vigiarInatividade();
+    liberar();
+  }
+  async function entrar(loginDigitado, senha) {
+    var login = normal(loginDigitado), conta = lerAcessos().contas[login];
+    var pacote = lerJSON(localStorage, COFRE + login, null);
+    if (!conta || !pacote) { await new Promise(function (r) { setTimeout(r, 400); }); throw new Error("errado"); }
+    var chave = await derivar(senha, deB64(conta.sal), conta.iter);
+    var dados;
+    try { dados = await decifrar(chave, pacote); } catch (e) { throw new Error("errado"); }
+    await abrir(login, conta.nome, chave, dados);
+  }
+  async function criar(loginDigitado, senha) {
+    var login = normal(loginDigitado), acessos = lerAcessos();
+    if (acessos.contas[login]) throw new Error("Já existe um acesso com esse login neste navegador.");
+    var sal = crypto.getRandomValues(new Uint8Array(16));
+    var chave = await derivar(senha, sal, ITERACOES);
+    var dados = { propostas: {}, config: {} };
+    // propostas salvas sem senha (versão anterior) passam para dentro do primeiro acesso
+    var antigas = lerJSON(localStorage, ANTIGAS.propostas, null), cfgAntiga = lerJSON(localStorage, ANTIGAS.config, null);
+    if (antigas) dados.propostas = antigas;
+    if (cfgAntiga) dados.config = cfgAntiga;
+    var ex = document.getElementById("exemplo-proposta");
+    if (ex && !antigas) { var d = JSON.parse(ex.textContent); d.criadoEm = d.atualizadoEm = new Date().toISOString(); dados.propostas["exemplo-proposta"] = d; }
+    localStorage.setItem(COFRE + login, JSON.stringify(await cifrar(chave, dados)));
+    acessos.contas[login] = { nome: String(loginDigitado).trim(), sal: b64(sal), iter: ITERACOES, criadoEm: new Date().toISOString() };
+    localStorage.setItem(ACESSOS, JSON.stringify(acessos));
+    [ANTIGAS.propostas, ANTIGAS.config, "adecon.propostas.exemplo"].forEach(function (k) { try { localStorage.removeItem(k); } catch (e) {} });
+    await abrir(login, acessos.contas[login].nome, chave, dados);
+  }
+  function remover(loginDigitado) {
+    var login = normal(loginDigitado), acessos = lerAcessos();
+    if (!acessos.contas[login]) return false;
+    delete acessos.contas[login];
+    localStorage.setItem(ACESSOS, JSON.stringify(acessos));
+    localStorage.removeItem(COFRE + login);
+    return true;
+  }
+  function bloquear() {
+    try { sessionStorage.removeItem(SESSAO); } catch (e) {}
+    location.reload();
+  }
+  function temAlteracoes() { try { return typeof sujo !== "undefined" && sujo; } catch (e) { return false; } }
+
+  /* API usada pela tela de Configurações (seção "Acesso") */
+  window.__acesso = {
+    nome: function () { return sessao ? sessao.nome : ""; },
+    bloquear: function () {
+      if (temAlteracoes()) { toast("Salve ou descarte as alterações antes de sair.", true); return; }
+      bloquear();
+    },
+    trocarSenha: async function (atual, nova) {
+      var conta = lerAcessos().contas[sessao.login];
+      var chaveAtual = await derivar(atual, deB64(conta.sal), conta.iter);
+      try { await decifrar(chaveAtual, lerJSON(localStorage, COFRE + sessao.login, null)); }
+      catch (e) { throw new Error("A senha atual não confere."); }
+      var sal = crypto.getRandomValues(new Uint8Array(16));
+      var chave = await derivar(nova, sal, ITERACOES);
+      localStorage.setItem(COFRE + sessao.login, JSON.stringify(await cifrar(chave, estado)));
+      var acessos = lerAcessos();
+      acessos.contas[sessao.login] = Object.assign(acessos.contas[sessao.login], { sal: b64(sal), iter: ITERACOES });
+      localStorage.setItem(ACESSOS, JSON.stringify(acessos));
+      sessao.chave = chave;
+      try { sessionStorage.setItem(SESSAO, JSON.stringify({ login: sessao.login, chave: b64(await crypto.subtle.exportKey("raw", chave)) })); } catch (e) {}
+    }
+  };
+
+  /* ---------------- bloqueio por inatividade ---------------- */
+  function vigiarInatividade() {
+    var ultimo = Date.now();
+    ["pointerdown", "keydown", "wheel", "touchstart"].forEach(function (ev) { addEventListener(ev, function () { ultimo = Date.now(); }, { passive: true }); });
+    setInterval(function () {
+      if (Date.now() - ultimo > INATIVIDADE_MS && !temAlteracoes()) bloquear();
+    }, 30000);
+  }
+
+  /* ---------------- usuário no menu lateral ---------------- */
+  function montarUsuario() {
+    var pe = document.querySelector(".side-foot");
+    if (!pe) return;
+    pe.innerHTML = '<div class="quem"><span>Conectado como</span><b></b></div><button type="button" class="sair" id="bt-sair">Sair</button>';
+    pe.querySelector("b").textContent = sessao.nome;
+    document.getElementById("bt-sair").onclick = window.__acesso.bloquear;
+  }
+
+  /* ---------------- tela de entrada ---------------- */
+  var estilo = document.createElement("style");
+  estilo.textContent = [
+    "html.travado,html.travado body{overflow:hidden}",
+    // acima do painel, abaixo dos avisos (#toasts usa 50)
+    "#acesso{position:fixed;inset:0;z-index:40;display:grid;grid-template-columns:1.05fr 1fr;background:var(--bg);color:var(--txt);font-family:var(--ff)}",
+    "#acesso .arte{position:relative;overflow:hidden;background:radial-gradient(120% 90% at 85% 110%,rgba(16,52,83,.95),rgba(16,52,83,0) 60%),radial-gradient(70% 60% at 0% 0%,rgba(16,52,83,.45),rgba(16,52,83,0) 60%),#00031B;color:#fff;padding:48px;display:flex;flex-direction:column;justify-content:space-between}",
+    "#acesso .marca{display:flex;align-items:center;gap:14px}",
+    "#acesso .marca img{width:40px}",
+    "#acesso .marca b{display:block;font-family:var(--ff-d);font-weight:600;font-size:17px;letter-spacing:.42em}",
+    "#acesso .marca span{display:block;font-size:10px;letter-spacing:.3em;text-transform:uppercase;opacity:.7;margin-top:2px}",
+    "#acesso .arte h2{font-family:var(--ff-d);font-weight:600;font-size:28px;line-height:1.25;max-width:16ch;letter-spacing:.01em;margin:0}",
+    "#acesso .arte p{margin:14px 0 0;max-width:40ch;color:#C9CEDC;font-size:14px}",
+    "#acesso .selos{display:flex;flex-wrap:wrap;gap:8px}",
+    "#acesso .selos span{font-family:var(--ff-d);font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:#C9CEDC;border:1px solid rgba(255,255,255,.18);border-radius:99px;padding:5px 12px}",
+    "#acesso .lado{display:flex;align-items:center;justify-content:center;padding:32px 20px;overflow-y:auto}",
+    "#acesso form{width:100%;max-width:360px;display:flex;flex-direction:column;gap:14px}",
+    "#acesso h1{font-family:var(--ff-d);font-weight:600;font-size:22px;margin:0}",
+    "#acesso .sub{margin:-8px 0 4px;color:var(--txt-3);font-size:13px}",
+    "#acesso .senha{display:flex;border:1px solid var(--line-strong);border-radius:var(--r);background:var(--surface);overflow:hidden}",
+    "#acesso .senha:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}",
+    "#acesso .senha input{border:0;flex:1;min-width:0}",
+    "#acesso .senha input:focus{box-shadow:none}",
+    "#acesso .senha button{all:unset;cursor:pointer;padding:0 12px;font-size:12px;font-weight:700;color:var(--accent)}",
+    "#acesso .senha button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}",
+    "#acesso .erro{color:var(--danger);font-size:13px;min-height:1.2em;margin:-4px 0}",
+    "#acesso .aviso{font-size:12.5px;color:var(--warn);background:var(--warn-soft);border-radius:var(--r);padding:10px 12px}",
+    "#acesso .info{font-size:12.5px;color:var(--txt-2);background:var(--accent-soft);border-radius:var(--r);padding:10px 12px}",
+    "#acesso .btn.primary{width:100%;padding:10px 14px}",
+    "#acesso .links{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:12.5px}",
+    "#acesso .texto{font-size:13px;color:var(--txt-2);margin:0}",
+    "@media (max-width:820px){#acesso{grid-template-columns:1fr}#acesso .arte{display:none}}",
+    // usuário conectado, no rodapé do menu lateral
+    ".side-foot{display:flex;align-items:center;gap:10px;opacity:1}",
+    ".side-foot .quem{flex:1;min-width:0}",
+    ".side-foot .quem span{display:block;font-size:10px;letter-spacing:.2em;text-transform:uppercase;opacity:.6}",
+    ".side-foot .quem b{display:block;color:var(--side-hi);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+    ".side-foot .sair{all:unset;cursor:pointer;font-size:12px;font-weight:700;color:var(--side-txt);border:1px solid rgba(255,255,255,.2);border-radius:6px;padding:5px 11px}",
+    ".side-foot .sair:hover{color:var(--side-hi);border-color:rgba(255,255,255,.45)}",
+    ".side-foot .sair:focus-visible{outline:2px solid var(--side-hi);outline-offset:2px}"
+  ].join("\n");
+  document.head.appendChild(estilo);
+  document.documentElement.classList.add("travado");
+
+  var LOGO = "data:image/png;base64,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";
+  document.body.insertAdjacentHTML("beforeend",
+    '<section id="acesso" aria-label="Acesso ao painel">' +
+      '<div class="arte"><div class="marca"><img src="' + LOGO + '" alt=""><div><b>ADECON</b><span>Propostas</span></div></div>' +
+        '<div><h2>Propostas Formalizadas, do escopo ao documento final.</h2>' +
+        '<p>Cada acesso tem o próprio histórico, guardado neste computador e criptografado com a sua senha.</p></div>' +
+        '<div class="selos"><span>Escopo</span><span>Proposta</span><span>PDF</span><span>Histórico</span></div></div>' +
+      '<div class="lado"><form id="acesso-form" novalidate autocomplete="on"></form></div>' +
+    '</section>');
+
+  var form = document.getElementById("acesso-form"), falhas = 0, travadoAte = 0;
+  function campoSenha(id, rotulo, auto) {
+    return '<div class="field"><label for="' + id + '">' + rotulo + '</label><div class="senha"><input type="password" id="' + id + '" autocomplete="' + auto + '" required>' +
+      '<button type="button" data-ver="' + id + '" aria-label="Mostrar senha">Mostrar</button></div></div>';
+  }
+  function ligarVer() {
+    form.querySelectorAll("[data-ver]").forEach(function (b) {
+      b.onclick = function () {
+        var i = document.getElementById(b.dataset.ver), ver = i.type === "password";
+        i.type = ver ? "text" : "password"; b.textContent = ver ? "Ocultar" : "Mostrar";
+        b.setAttribute("aria-label", ver ? "Ocultar senha" : "Mostrar senha");
+      };
+    });
+  }
+  function erro(msg) { var e = form.querySelector(".erro"); if (e) e.textContent = msg || ""; }
+  var suporte = !!(window.crypto && crypto.subtle && window.isSecureContext);
+
+  function telaEntrar() {
+    form.innerHTML =
+      '<h1>Entrar</h1><p class="sub">Painel de Propostas da Adecon</p>' +
+      (suporte ? "" : '<div class="aviso">Este navegador não permite a criptografia do painel. Abra pelo link do GitHub ou pelo arquivo no Chrome ou no Edge.</div>') +
+      '<div class="field"><label for="ac-login">Login</label><input type="text" id="ac-login" autocomplete="username" autocapitalize="none" spellcheck="false" required></div>' +
+      campoSenha("ac-senha", "Senha", "current-password") +
+      '<p class="erro" role="alert"></p>' +
+      '<button class="btn primary" type="submit" id="ac-ok"' + (suporte ? "" : " disabled") + '>Entrar</button>' +
+      '<div class="links"><button type="button" class="link" id="ac-criar">Criar acesso neste computador</button><button type="button" class="link" id="ac-esqueci">Esqueci a senha</button></div>';
+    ligarVer();
+    document.getElementById("ac-criar").onclick = telaCriar;
+    document.getElementById("ac-esqueci").onclick = telaEsqueci;
+    form.onsubmit = async function (e) {
+      e.preventDefault();
+      var login = document.getElementById("ac-login").value, senha = document.getElementById("ac-senha").value;
+      if (Date.now() < travadoAte) return;
+      if (!login.trim() || !senha) { erro("Preencha login e senha."); return; }
+      var bt = document.getElementById("ac-ok"); bt.disabled = true; bt.textContent = "Abrindo…"; erro("");
+      try { await entrar(login, senha); }
+      catch (err) {
+        falhas++;
+        bt.textContent = "Entrar"; bt.disabled = false;
+        document.getElementById("ac-senha").value = "";
+        if (falhas >= TENTATIVAS) {   // freio contra tentativas em sequência
+          travadoAte = Date.now() + ESPERA_S * 1000; falhas = 0; bt.disabled = true;
+          var t = setInterval(function () {
+            var s = Math.ceil((travadoAte - Date.now()) / 1000);
+            if (s <= 0) { clearInterval(t); bt.disabled = false; erro(""); return; }
+            erro("Muitas tentativas. Tente de novo em " + s + " s.");
+          }, 250);
+        } else erro("Login ou senha incorretos.");
+        document.getElementById("ac-senha").focus();
+      }
+    };
+    setTimeout(function () { document.getElementById("ac-login").focus(); }, 0);
+  }
+
+  function telaCriar() {
+    var antigas = lerJSON(localStorage, ANTIGAS.propostas, null), n = antigas ? Object.keys(antigas).length : 0;
+    var jaTem = Object.keys(lerAcessos().contas).length > 0;
+    form.innerHTML =
+      '<h1>Criar acesso</h1><p class="sub">Vale só para este navegador, neste computador.</p>' +
+      (n ? '<div class="info">Há ' + n + ' proposta(s) salvas neste navegador sem proteção. Elas vão para dentro deste acesso e a cópia sem senha é apagada.</div>' : "") +
+      '<div class="field"><label for="ac-login">Login</label><input type="text" id="ac-login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="40" required></div>' +
+      campoSenha("ac-senha", "Senha <span class=\"help\">· mínimo de 8 caracteres</span>", "new-password") +
+      campoSenha("ac-senha2", "Confirmar senha", "new-password") +
+      '<div class="aviso"><b>Guarde sua senha.</b> Ela não pode ser recuperada: sem ela, as propostas só voltam por um backup exportado.</div>' +
+      '<p class="erro" role="alert"></p>' +
+      '<button class="btn primary" type="submit" id="ac-ok"' + (suporte ? "" : " disabled") + '>Criar acesso e entrar</button>' +
+      (jaTem ? '<div class="links"><button type="button" class="link" id="ac-voltar">Já tenho acesso</button></div>' : "");
+    ligarVer();
+    var v = document.getElementById("ac-voltar"); if (v) v.onclick = telaEntrar;
+    form.onsubmit = async function (e) {
+      e.preventDefault();
+      var login = document.getElementById("ac-login").value.trim();
+      var s1 = document.getElementById("ac-senha").value, s2 = document.getElementById("ac-senha2").value;
+      if (login.length < 3) { erro("O login precisa ter pelo menos 3 caracteres."); return; }
+      if (s1.length < 8) { erro("A senha precisa ter pelo menos 8 caracteres."); return; }
+      if (s1 !== s2) { erro("As senhas não conferem."); return; }
+      var bt = document.getElementById("ac-ok"); bt.disabled = true; bt.textContent = "Criando…"; erro("");
+      try { await criar(login, s1); }
+      catch (err) { bt.disabled = false; bt.textContent = "Criar acesso e entrar"; erro(err.message); }
+    };
+    setTimeout(function () { document.getElementById("ac-login").focus(); }, 0);
+  }
+
+  function telaEsqueci() {
+    form.innerHTML =
+      '<h1>Esqueci a senha</h1>' +
+      '<p class="texto">A senha não pode ser recuperada: as propostas ficam criptografadas com ela e ninguém, nem a Adecon, consegue abri-las sem a senha.</p>' +
+      '<p class="texto"><b>Se você tem um backup</b> (arquivo .json exportado em Configurações): crie um novo acesso e importe o arquivo em <b>Configurações › Backup do histórico</b>.</p>' +
+      '<p class="texto"><b>Para remover o acesso esquecido</b> deste computador, digite o login e a palavra APAGAR. As propostas desse acesso serão apagadas.</p>' +
+      '<div class="field"><label for="ac-login">Login a remover</label><input type="text" id="ac-login" autocapitalize="none" spellcheck="false"></div>' +
+      '<div class="field"><label for="ac-conf">Digite APAGAR para confirmar</label><input type="text" id="ac-conf" autocomplete="off"></div>' +
+      '<p class="erro" role="alert"></p>' +
+      '<button class="btn danger" type="submit" id="ac-ok" style="width:100%" disabled>Remover acesso</button>' +
+      '<div class="links"><button type="button" class="link" id="ac-voltar">Voltar para entrar</button></div>';
+    var conf = document.getElementById("ac-conf");
+    conf.oninput = function () { document.getElementById("ac-ok").disabled = conf.value.trim().toUpperCase() !== "APAGAR"; };
+    document.getElementById("ac-voltar").onclick = function () { Object.keys(lerAcessos().contas).length ? telaEntrar() : telaCriar(); };
+    form.onsubmit = function (e) {
+      e.preventDefault();
+      if (!remover(document.getElementById("ac-login").value)) { erro("Não há acesso com esse login neste navegador."); return; }
+      Object.keys(lerAcessos().contas).length ? telaEntrar() : telaCriar();
+      toast("Acesso removido deste computador.");
+    };
+    setTimeout(function () { document.getElementById("ac-login").focus(); }, 0);
+  }
+
+  /* ---------------- início: sessão da aba ou tela de entrada ---------------- */
+  (async function () {
+    var s = lerJSON(sessionStorage, SESSAO, null), conta = s && lerAcessos().contas[s.login], pacote = s && lerJSON(localStorage, COFRE + s.login, null);
+    if (s && conta && pacote && suporte) {
+      try {
+        var chave = await crypto.subtle.importKey("raw", deB64(s.chave), { name: "AES-GCM" }, true, ["encrypt", "decrypt"]);
+        await abrir(s.login, conta.nome, chave, await decifrar(chave, pacote));
+        return;
+      } catch (e) { try { sessionStorage.removeItem(SESSAO); } catch (_) {} }
+    }
+    Object.keys(lerAcessos().contas).length ? telaEntrar() : telaCriar();
+  })();
 })();
 
 </script>
@@ -1552,6 +1847,17 @@ async function renderConfig() {
   const inp = (k, rot) => `<div class="field"><label for="cfg-${k}">${rot}</label><input type="text" id="cfg-${k}" data-rot="${k}" value="${esc(cfg.rotulos[k])}" placeholder="${esc(ROTULOS_PADRAO[k])}"></div>`;
 
   $("#cfg").innerHTML =
+    // só nas versões fora do claude.ai, que têm login próprio (adaptador-local.js)
+    (window.__acesso ? sec(null, "Acesso", `
+      <p class="help" style="margin:0">Conectado como <b id="cfg-quem"></b>. As propostas deste acesso ficam criptografadas com a sua senha neste computador.</p>
+      <div class="acoes"><button type="button" class="btn" id="cfg-sair">Sair agora</button></div>
+      <div class="grupo-lbl">Trocar senha</div>
+      <div class="g3">
+        <div class="field"><label for="cfg-senha-atual">Senha atual</label><input type="password" id="cfg-senha-atual" autocomplete="current-password"></div>
+        <div class="field"><label for="cfg-senha-nova">Nova senha <span class="help">· mín. 8</span></label><input type="password" id="cfg-senha-nova" autocomplete="new-password"></div>
+        <div class="field"><label for="cfg-senha-conf">Confirmar nova senha</label><input type="password" id="cfg-senha-conf" autocomplete="new-password"></div>
+      </div>
+      <div class="acoes"><button type="button" class="btn" id="cfg-trocar">Trocar senha</button></div>`) : "") +
     sec(null, "Aparência", `
       <div class="seg" role="group" aria-label="Tema">${[["auto", "Automático"], ["claro", "Claro"], ["escuro", "Escuro"]].map(([v, r]) =>
         `<button type="button" data-tema="${v}" aria-pressed="${tema === v}">${r}</button>`).join("")}</div>
@@ -1572,7 +1878,8 @@ async function renderConfig() {
     sec(null, "Backup do histórico", `
       <p class="help" style="margin:0">${compartilhado()
         ? "Baixe uma cópia de todas as propostas da equipe, ou importe um arquivo exportado antes. Na importação, uma proposta que já existe só é substituída se a do arquivo for mais recente."
-        : "O histórico fica neste navegador: exporte com frequência. O arquivo também serve para levar as propostas a outro computador. Na importação, uma proposta que já existe só é substituída se a do arquivo for mais recente."}</p>
+        : "O histórico fica neste navegador: exporte com frequência. O arquivo também serve para levar as propostas a outro computador. Na importação, uma proposta que já existe só é substituída se a do arquivo for mais recente."}
+        <b>O arquivo exportado não tem senha:</b> guarde-o numa pasta de acesso restrito.</p>
       <div class="acoes"><button type="button" class="btn" id="cfg-exportar" ${db ? "" : "disabled"}>Exportar histórico</button><button type="button" class="btn" id="cfg-importar" ${db ? "" : "disabled"}>Importar histórico</button>
         <span class="help">${propostas.length} proposta(s) no histórico</span></div>
       ${dono && db ? `<div class="perigo"><div><b>Apagar todo o histórico.</b> <span class="help">Remove todas as propostas${compartilhado() ? " para toda a equipe" : " deste navegador"}. Não dá para desfazer: exporte antes.</span></div>
@@ -1596,6 +1903,23 @@ async function renderConfig() {
       <div class="acoes"><button type="button" class="btn" id="cfg-copiar">Copiar exemplo</button><button type="button" class="btn" id="cfg-usar">Criar proposta com este exemplo</button></div>
     </div>`) + `</div>`;
 
+  if (window.__acesso) {
+    $("#cfg-quem").textContent = window.__acesso.nome();
+    $("#cfg-sair").onclick = () => window.__acesso.bloquear();
+    $("#cfg-trocar").onclick = async () => {
+      const atualS = $("#cfg-senha-atual").value, nova = $("#cfg-senha-nova").value, conf = $("#cfg-senha-conf").value;
+      if (!atualS || !nova) { toast("Preencha a senha atual e a nova senha.", true); return; }
+      if (nova.length < 8) { toast("A nova senha precisa ter pelo menos 8 caracteres.", true); return; }
+      if (nova !== conf) { toast("A confirmação não confere com a nova senha.", true); return; }
+      const b = $("#cfg-trocar"); b.disabled = true; b.textContent = "Trocando…";
+      try {
+        await window.__acesso.trocarSenha(atualS, nova);
+        ["#cfg-senha-atual", "#cfg-senha-nova", "#cfg-senha-conf"].forEach(s => { $(s).value = ""; });
+        toast("Senha trocada. Use a nova senha no próximo acesso.");
+      } catch (err) { toast(err.message || "Não foi possível trocar a senha.", true); }
+      finally { b.disabled = false; b.textContent = "Trocar senha"; }
+    };
+  }
   $$("[data-tema]").forEach(b => b.onclick = () => {
     try { localStorage.setItem(TEMA_CHAVE, b.dataset.tema); } catch (e) {}
     aplicarTema(b.dataset.tema);
